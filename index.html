@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VC Funding Scenario Simulator</title>
+    <script src="https://unpkg.com/react@17/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com?plugins=forms"></script>
+    <style>
+        /* Basic body styling */
+        body {
+            font-family: sans-serif;
+            background-color: #f8fafc; /* Tailwind gray-50 */
+        }
+        /* Add some subtle animation for loading */
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+        .spinner {
+          display: inline-block;
+          width: 1rem;
+          height: 1rem;
+          vertical-align: text-bottom;
+          border: 0.15em solid currentColor;
+          border-right-color: transparent;
+          border-radius: 50%;
+          animation: spin .75s linear infinite;
+          margin-left: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // --- React and Hook Imports (available globally via CDN) ---
+        const { useState, useCallback, useMemo } = React;
+        // console.log("React loaded:", typeof React !== 'undefined'); // Debug log
+
+        // --- Simulation Logic (Ported from Python to JS) ---
+
+        // Constants and Fixed Assumptions
+        const INITIAL_TOTAL_SHARES = 10_000_000;
+        const FOUNDER_SHARES = 9_000_000;
+        const INITIAL_ESOP_SHARES = 1_000_000;
+        const ESOP_TARGET_PCT = 0.15; // Target 15% post-money (simplified calculation)
+
+        const SCENARIO_PARAMS = {
+            "Conservative": {
+                rounds: [],
+                exit_valuation: 30_000_000,
+                exit_type: "Acquisition"
+            },
+            "Baseline": {
+                rounds: [
+                    {"name": "Series A", "investment": 8_000_000, "pre_money": 25_000_000},
+                    {"name": "Series B", "investment": 20_000_000, "pre_money": 70_000_000},
+                    {"name": "Series C", "investment": 40_000_000, "pre_money": 160_000_000},
+                ],
+                exit_valuation: 300_000_000,
+                exit_type: "Acquisition"
+            },
+            "Bullish": {
+                 rounds: [
+                    {"name": "Series A", "investment": 10_000_000, "pre_money": 35_000_000},
+                    {"name": "Series B", "investment": 30_000_000, "pre_money": 120_000_000},
+                    {"name": "Series C", "investment": 60_000_000, "pre_money": 300_000_000},
+                ],
+                exit_valuation: {
+                    "IPO": 700_000_000,
+                    "Acquisition": 2_000_000_000
+                }, // Comma was correctly added here previously
+                "exit_type": "IPO_and_Acquisition" // Key was correctly quoted previously
+            }
+        };
+
+        /**
+         * Calculates shares issued for a single SAFE note upon conversion.
+         */
+        function calculateSafeConversion(safe_details, trigger_pps, fd_shares_pre_conversion, trigger_cap_valuation = null) {
+            // console.log("Calculating SAFE conversion:", safe_details, trigger_pps, fd_shares_pre_conversion); // Debug log
+            const { investment, cap, discount: discountPercent } = safe_details;
+            const discount = discountPercent / 100.0;
+
+            const safe_trigger_pps = Math.max(trigger_pps, 0.000001);
+            const discount_price = safe_trigger_pps * (1.0 - discount);
+
+            let cap_price = Infinity;
+            if (cap && fd_shares_pre_conversion > 0) {
+                cap_price = cap / fd_shares_pre_conversion;
+            }
+
+            let conversion_price = discount_price;
+            if (cap) {
+                conversion_price = Math.min(discount_price, cap_price);
+            }
+
+            if (conversion_price <= 0) {
+                console.warn(`Calculated SAFE conversion price is zero or negative (${conversion_price}). Setting shares to 0.`);
+                return 0;
+            }
+
+            const shares_issued = investment / conversion_price;
+            // console.log(` -> Conversion Price: ${conversion_price.toFixed(4)}, Shares Issued: ${shares_issued.toFixed(0)}`); // Debug log
+            return shares_issued;
+        }
+
+        /**
+         * Simulates a single scenario (Conservative, Baseline, or Bullish).
+         */
+        function simulateScenario(scenario_name, initial_shares_dict, safe_terms) {
+            // console.log(`--- Simulating: ${scenario_name} Scenario ---`); // Debug log
+            let shares = { ...initial_shares_dict };
+            const params = SCENARIO_PARAMS[scenario_name];
+            const safes_invested = { ...safe_terms };
+
+            // --- Conservative Scenario Special Handling ---
+            if (scenario_name === "Conservative") {
+                const exit_valuation = params.exit_valuation;
+                let fd_pre_conversion = Object.values(shares).reduce((sum, count) => sum + count, 0);
+                // console.log(` Conservative Exit @ ${exit_valuation.toLocaleString()}`);
+                // console.log(`  Initial Shares: ${fd_pre_conversion.toLocaleString()}`);
+
+                const est_trigger_pps = fd_pre_conversion > 0 ? exit_valuation / fd_pre_conversion : 0.000001;
+                // console.log(`  Est. Trigger PPS for Conversion: ${est_trigger_pps.toFixed(4)}`);
+
+                let total_shares_after_conversion = fd_pre_conversion;
+                const converted_safe_shares = {};
+
+                // Pre-Seed Conversion
+                const ps_shares = calculateSafeConversion(
+                    safes_invested['Pre-Seed'], est_trigger_pps, fd_pre_conversion, exit_valuation
+                );
+                converted_safe_shares['Pre-Seed'] = ps_shares;
+                total_shares_after_conversion += ps_shares;
+                // console.log(`  Pre-Seed converts to ${ps_shares.toLocaleString(undefined, {maximumFractionDigits:0})} shares`);
+
+                // Seed Conversion
+                const fd_shares_for_seed_cap_calc = fd_pre_conversion + ps_shares;
+                const s_shares = calculateSafeConversion(
+                    safes_invested['Seed'], est_trigger_pps, fd_shares_for_seed_cap_calc, exit_valuation
+                );
+                converted_safe_shares['Seed'] = s_shares;
+                total_shares_after_conversion += s_shares;
+                // console.log(`  Seed converts to ${s_shares.toLocaleString(undefined, {maximumFractionDigits:0})} shares`);
+
+                shares['Pre-Seed'] = converted_safe_shares['Pre-Seed'] || 0;
+                shares['Seed'] = converted_safe_shares['Seed'] || 0;
+                const total_final_shares = total_shares_after_conversion;
+                // console.log(`  Total Shares at Exit: ${total_final_shares.toLocaleString(undefined, {maximumFractionDigits:0})}`);
+
+                const value_per_share = total_final_shares > 0 ? exit_valuation / total_final_shares : 0;
+                return {
+                    Scenario: scenario_name, ExitValuation: exit_valuation, TotalShares: total_final_shares,
+                    ValuePerShare: value_per_share, FinalShares: shares, ExitType: params.exit_type
+                };
+            }
+
+            // --- Baseline & Bullish Scenario Simulation ---
+            let safes_to_convert_in_A = Object.keys(safes_invested);
+
+            params.rounds.forEach(round_info => {
+                const { name: round_name, investment, pre_money } = round_info;
+                // console.log(`\n Simulating ${round_name}: Invest=$${investment.toLocaleString()}, Pre-Money=$${pre_money.toLocaleString()}`);
+
+                const fd_pre_round = Object.values(shares).reduce((sum, count) => sum + count, 0);
+                const current_esop = shares['ESOP'] || 0;
+                // console.log(`  Shares before ${round_name}: ${fd_pre_round.toLocaleString(undefined, {maximumFractionDigits:0})}`);
+
+                // Simplified ESOP Top-up Calculation
+                const denominator = 1.0 - ESOP_TARGET_PCT;
+                const target_total_esop_shares = denominator !== 0 ? (fd_pre_round / denominator) * ESOP_TARGET_PCT : fd_pre_round * 1.15 * 0.15;
+                const new_esop_shares = Math.max(0, target_total_esop_shares - current_esop);
+
+                shares['ESOP'] = current_esop + new_esop_shares;
+                const fd_post_esop = fd_pre_round + new_esop_shares;
+                // console.log(`  ESOP Top-up: Added ${new_esop_shares.toLocaleString(undefined, {maximumFractionDigits:0})} shares. Pool: ${shares['ESOP'].toLocaleString(undefined, {maximumFractionDigits:0})}. FD: ${fd_post_esop.toLocaleString(undefined, {maximumFractionDigits:0})}`);
+
+                // SAFE Conversion (Triggered by Series A)
+                let total_safe_shares_added = 0;
+                if (round_name === "Series A" && safes_to_convert_in_A.length > 0) {
+                    const trigger_pps = fd_post_esop > 0 ? pre_money / fd_post_esop : 0.000001;
+                    // console.log(`  Series A Trigger PPS (est. for SAFE conv.): $${trigger_pps.toFixed(2)}`);
+
+                    let current_fd_for_cap_calc = fd_post_esop;
+                    const safes_converted_this_round = {};
+                    safes_to_convert_in_A.forEach(safe_name => {
+                         const safe_details = safes_invested[safe_name];
+                         const shares_issued = calculateSafeConversion(safe_details, trigger_pps, current_fd_for_cap_calc);
+                         safes_converted_this_round[safe_name] = shares_issued;
+                         total_safe_shares_added += shares_issued;
+                         current_fd_for_cap_calc += shares_issued;
+                         // console.log(`  ${safe_name} converts to ${shares_issued.toLocaleString(undefined, {maximumFractionDigits:0})} shares`);
+                    });
+
+                    Object.entries(safes_converted_this_round).forEach(([name, count]) => {
+                         shares[name] = (shares[name] || 0) + count;
+                    });
+
+                    safes_to_convert_in_A = [];
+                }
+
+                const fd_post_safes = fd_post_esop + total_safe_shares_added;
+                // console.log(`  Shares after SAFE Conv: ${fd_post_safes.toLocaleString(undefined, {maximumFractionDigits:0})}`);
+
+                // New Investment
+                const pps = fd_post_safes > 0 ? pre_money / fd_post_safes : 0.000001;
+                const new_investor_shares = pps > 0 ? investment / pps : 0;
+                shares[round_name] = new_investor_shares;
+                const total_shares_post_round = fd_post_safes + new_investor_shares;
+                // console.log(`  ${round_name} PPS: $${pps.toFixed(2)}. New shares: ${new_investor_shares.toLocaleString(undefined, {maximumFractionDigits:0})}`);
+                // console.log(`  Total Shares after ${round_name}: ${total_shares_post_round.toLocaleString(undefined, {maximumFractionDigits:0})}`);
+            });
+
+            // Calculate Exit Values
+            const final_shares_post_rounds = shares;
+            const total_shares_at_exit = Object.values(final_shares_post_rounds).reduce((sum, count) => sum + count, 0);
+
+            const results = {
+                Scenario: scenario_name, TotalShares: total_shares_at_exit,
+                FinalShares: final_shares_post_rounds, ExitType: params.exit_type
+            };
+
+            if (params.exit_type === "IPO_and_Acquisition") {
+                const ipo_val = params.exit_valuation.IPO;
+                const acq_val = params.exit_valuation.Acquisition;
+                results.ExitValuation_IPO = ipo_val;
+                results.ValuePerShare_IPO = total_shares_at_exit > 0 ? ipo_val / total_shares_at_exit : 0;
+                results.ExitValuation_Acq = acq_val;
+                results.ValuePerShare_Acq = total_shares_at_exit > 0 ? acq_val / total_shares_at_exit : 0;
+            } else {
+                const exit_val = params.exit_valuation;
+                results.ExitValuation = exit_val;
+                results.ValuePerShare = total_shares_at_exit > 0 ? exit_val / total_shares_at_exit : 0;
+            }
+            // console.log(`--- Finished Simulating: ${scenario_name} Scenario ---`); // Debug log
+            return results;
+        }
+
+
+        // --- Formatting Helpers ---
+        const formatNumber = (num, options = {}) => {
+            const defaultOptions = { maximumFractionDigits: 0 };
+            return (num || 0).toLocaleString(undefined, { ...defaultOptions, ...options });
+        };
+        const formatCurrency = (num) => {
+             if (Math.abs(num) >= 1e9) {
+                return (num / 1e9).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 1, maximumFractionDigits: 2 }) + 'B';
+            }
+            if (Math.abs(num) >= 1e6) {
+                return (num / 1e6).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 1, maximumFractionDigits: 2 }) + 'M';
+            }
+             if (Math.abs(num) >= 1e3) {
+                 return (num / 1e3).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 1, maximumFractionDigits: 2 }) + 'k';
+             }
+            return (num || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+        };
+         const formatCurrencyNoAbbrev = (num) => {
+             return (num || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+         };
+        const formatPercent = (num) => {
+            return (num || 0).toLocaleString(undefined, { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        };
+        const formatMultiple = (num) => {
+            return (num || 0).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + 'x';
+        };
+
+
+        // --- React Component Definition ---
+        function App() {
+            // console.log("Rendering App component"); // Debug log
+            // State for user inputs
+            const [psCapInput, setPsCapInput] = useState('8000000');
+            const [psDiscountInput, setPsDiscountInput] = useState('20');
+            const [seedCapInput, setSeedCapInput] = useState('0');
+            const [seedDiscountInput, setSeedDiscountInput] = useState('20');
+
+            // State for results, loading, and errors
+            const [results, setResults] = useState(null);
+            const [isLoading, setIsLoading] = useState(false);
+            const [error, setError] = useState(null);
+
+            // Memoized initial SAFE investments (fixed)
+            const initialInvestments = useMemo(() => ({
+                'Pre-Seed': 500_000,
+                'Seed': 1_500_000
+            }), []);
+
+            // Callback function to handle running the simulation
+            const handleRunSimulation = useCallback(() => {
+                // console.log("handleRunSimulation called"); // Debug log
+                setIsLoading(true);
+                setError(null);
+                setResults(null);
+
+                setTimeout(() => {
+                    try {
+                        // console.log("Parsing inputs..."); // Debug log
+                        const psCap = parseFloat(psCapInput);
+                        const psDiscount = parseFloat(psDiscountInput);
+                        const seedCap = parseFloat(seedCapInput);
+                        const seedDiscount = parseFloat(seedDiscountInput);
+
+                        if (isNaN(psCap) || psCap < 0 || isNaN(psDiscount) || psDiscount < 0 || psDiscount > 100 ||
+                            isNaN(seedCap) || seedCap < 0 || isNaN(seedDiscount) || seedDiscount < 0 || seedDiscount > 100) {
+                            throw new Error("Invalid input. Please enter valid numbers (Cap >= 0, Discount 0-100).");
+                        }
+                        // console.log("Inputs parsed:", { psCap, psDiscount, seedCap, seedDiscount }); // Debug log
+
+                        const safeTerms = {
+                            'Pre-Seed': { investment: initialInvestments['Pre-Seed'], cap: psCap > 0 ? psCap : null, discount: psDiscount },
+                            'Seed': { investment: initialInvestments['Seed'], cap: seedCap > 0 ? seedCap : null, discount: seedDiscount }
+                        };
+                        // console.log("SAFE Terms:", safeTerms); // Debug log
+
+                        const initial_shares = { 'Founders': FOUNDER_SHARES, 'ESOP': INITIAL_ESOP_SHARES };
+
+                        // console.log("Running simulations..."); // Debug log
+                        const conservativeResults = simulateScenario("Conservative", { ...initial_shares }, safeTerms);
+                        const baselineResults = simulateScenario("Baseline", { ...initial_shares }, safeTerms);
+                        const bullishResults = simulateScenario("Bullish", { ...initial_shares }, safeTerms);
+                        // console.log("Simulations complete."); // Debug log
+
+                        setResults({
+                            conservative: conservativeResults,
+                            baseline: baselineResults,
+                            bullish: bullishResults,
+                            safeTerms
+                        });
+                        // console.log("Results state updated."); // Debug log
+
+                    } catch (err) {
+                        console.error("Simulation Error:", err); // Log error to console
+                        setError(err.message || "An error occurred during simulation."); // Set error state for UI
+                    } finally {
+                        setIsLoading(false); // Clear loading state regardless of success/failure
+                        // console.log("handleRunSimulation finished."); // Debug log
+                    }
+                }, 10);
+
+            }, [psCapInput, psDiscountInput, seedCapInput, seedDiscountInput, initialInvestments]);
+
+            // Helper function to render results for a single scenario
+            const renderScenarioCard = (scenarioResult) => {
+                 if (!scenarioResult) return null;
+                 // console.log("Rendering card for:", scenarioResult.Scenario); // Debug log
+
+                const {
+                    Scenario, TotalShares, FinalShares, ExitType,
+                    ExitValuation, ValuePerShare, // Single exit
+                    ExitValuation_IPO, ValuePerShare_IPO, // IPO exit
+                    ExitValuation_Acq, ValuePerShare_Acq // Acquisition exit
+                } = scenarioResult;
+
+                const safeTermsUsed = results?.safeTerms;
+
+                return (
+                    <div className="mb-6 border bg-white text-gray-800 shadow-md rounded-lg overflow-hidden">
+                        <div className="flex flex-col space-y-1.5 p-4 sm:p-6 bg-gray-50 border-b">
+                            <h3 className="text-xl font-semibold leading-none tracking-tight text-gray-700">{Scenario} Scenario Results</h3>
+                        </div>
+                        <div className="p-4 sm:p-6">
+                            <h4 className="font-semibold text-lg mb-3 text-gray-600">Ownership Breakdown (at Exit):</h4>
+                            <div className="overflow-x-auto">
+                                <table className="w-full caption-bottom text-sm">
+                                    <thead className="[&_tr]:border-b">
+                                        <tr className="border-b">
+                                            <th className="h-12 px-4 text-left align-middle font-medium text-gray-500">Stakeholder</th>
+                                            <th className="h-12 px-4 text-right align-middle font-medium text-gray-500">Shares</th>
+                                            <th className="h-12 px-4 text-right align-middle font-medium text-gray-500">Percentage</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {Object.entries(FinalShares)
+                                            .sort(([, countA], [, countB]) => countB - countA)
+                                            .map(([owner, count]) => (
+                                            <tr key={owner} className="border-b hover:bg-gray-50/50">
+                                                <td className="p-4 align-middle font-medium">{owner}</td>
+                                                <td className="p-4 align-middle text-right">{formatNumber(count)}</td>
+                                                <td className="p-4 align-middle text-right">{formatPercent(TotalShares > 0 ? count / TotalShares : 0)}</td>
+                                            </tr>
+                                        ))}
+                                         <tr className="font-bold border-t">
+                                            <td className="p-4 align-middle">Total</td>
+                                            <td className="p-4 align-middle text-right">{formatNumber(TotalShares)}</td>
+                                            <td className="p-4 align-middle text-right">100.00%</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <h4 className="font-semibold text-lg mt-6 mb-3 text-gray-600">Exit Values:</h4>
+                            {ExitType === "IPO_and_Acquisition" ? (
+                                <div className="space-y-4">
+                                    <div>
+                                        <p className="font-medium"><strong>IPO @ {formatCurrency(ExitValuation_IPO)}</strong> (~{formatCurrencyNoAbbrev(ValuePerShare_IPO)}/share):</p>
+                                        <ul className="list-disc list-inside ml-4 text-sm space-y-1">
+                                            <li>Founders: {formatCurrency(FinalShares['Founders'] * ValuePerShare_IPO)}</li>
+                                            <li>Pre-Seed: {formatCurrency(FinalShares['Pre-Seed'] * ValuePerShare_IPO)}</li>
+                                            <li>Seed: {formatCurrency(FinalShares['Seed'] * ValuePerShare_IPO)}</li>
+                                        </ul>
+                                    </div>
+                                    <div>
+                                        <p className="font-medium"><strong>Acquisition @ {formatCurrency(ExitValuation_Acq)}</strong> (~{formatCurrencyNoAbbrev(ValuePerShare_Acq)}/share):</p>
+                                        <ul className="list-disc list-inside ml-4 text-sm space-y-1">
+                                            <li>Founders: {formatCurrency(FinalShares['Founders'] * ValuePerShare_Acq)}</li>
+                                            <li>Pre-Seed: {formatCurrency(FinalShares['Pre-Seed'] * ValuePerShare_Acq)} ({formatMultiple(safeTermsUsed ? (FinalShares['Pre-Seed'] * ValuePerShare_Acq) / safeTermsUsed['Pre-Seed'].investment : 0)} return)</li>
+                                            <li>Seed: {formatCurrency(FinalShares['Seed'] * ValuePerShare_Acq)} ({formatMultiple(safeTermsUsed ? (FinalShares['Seed'] * ValuePerShare_Acq) / safeTermsUsed['Seed'].investment : 0)} return)</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div>
+                                    <p className="font-medium"><strong>{ExitType} @ {formatCurrency(ExitValuation)}</strong> (~{formatCurrencyNoAbbrev(ValuePerShare)}/share):</p>
+                                     <ul className="list-disc list-inside ml-4 text-sm space-y-1">
+                                        <li>Founders: {formatCurrency(FinalShares['Founders'] * ValuePerShare)}</li>
+                                        <li>Pre-Seed: {formatCurrency(FinalShares['Pre-Seed'] * ValuePerShare)} ({formatMultiple(safeTermsUsed ? (FinalShares['Pre-Seed'] * ValuePerShare) / safeTermsUsed['Pre-Seed'].investment : 0)} return)</li>
+                                        <li>Seed: {formatCurrency(FinalShares['Seed'] * ValuePerShare)} ({formatMultiple(safeTermsUsed ? (FinalShares['Seed'] * ValuePerShare) / safeTermsUsed['Seed'].investment : 0)} return)</li>
+                                    </ul>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            };
+
+            // --- Main Component Render ---
+            return (
+                <div className="container mx-auto p-4 sm:p-6 lg:p-8 max-w-4xl">
+                    <h1 className="text-3xl font-bold mb-6 text-center text-gray-800">VC Funding Scenario Simulator</h1>
+
+                    {/* Input Card */}
+                    <div className="mb-8 border bg-white text-gray-800 shadow-lg rounded-lg">
+                        <div className="flex flex-col space-y-1.5 p-6 bg-gray-50 border-b rounded-t-lg">
+                             <h3 className="text-xl font-semibold leading-none tracking-tight text-gray-700">SAFE Note Inputs</h3>
+                        </div>
+                        <div className="p-6">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                                {/* Pre-Seed Inputs */}
+                                <div className="space-y-4">
+                                    <h3 className="text-lg font-semibold text-gray-600 border-b pb-2 mb-3">Pre-Seed Round</h3>
+                                    <div>
+                                        <label htmlFor="psCap" className="text-sm font-medium text-gray-700 mb-1 block">Valuation Cap ($) <span className="text-xs text-gray-500">(0 for No Cap)</span></label>
+                                        <input
+                                            id="psCap"
+                                            type="number"
+                                            value={psCapInput}
+                                            onChange={(e) => setPsCapInput(e.target.value)}
+                                            placeholder="e.g., 8000000"
+                                            min="0"
+                                            className="flex h-10 w-full rounded-md border border-gray-300 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50"
+                                        />
+                                    </div>
+                                     <div>
+                                        <label htmlFor="psDiscount" className="text-sm font-medium text-gray-700 mb-1 block">Discount (%)</label>
+                                        <input
+                                            id="psDiscount"
+                                            type="number"
+                                            value={psDiscountInput}
+                                            onChange={(e) => setPsDiscountInput(e.target.value)}
+                                            placeholder="e.g., 20"
+                                            min="0"
+                                            max="100"
+                                            step="0.1"
+                                            className="flex h-10 w-full rounded-md border border-gray-300 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50"
+                                        />
+                                    </div>
+                                </div>
+
+                                 {/* Seed Inputs */}
+                                 <div className="space-y-4">
+                                     <h3 className="text-lg font-semibold text-gray-600 border-b pb-2 mb-3">Seed Round</h3>
+                                     <div>
+                                        <label htmlFor="seedCap" className="text-sm font-medium text-gray-700 mb-1 block">Valuation Cap ($) <span className="text-xs text-gray-500">(0 for No Cap)</span></label>
+                                        <input
+                                            id="seedCap"
+                                            type="number"
+                                            value={seedCapInput}
+                                            onChange={(e) => setSeedCapInput(e.target.value)}
+                                            placeholder="e.g., 12000000"
+                                            min="0"
+                                            className="flex h-10 w-full rounded-md border border-gray-300 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50"
+                                        />
+                                    </div>
+                                     <div>
+                                        <label htmlFor="seedDiscount" className="text-sm font-medium text-gray-700 mb-1 block">Discount (%)</label>
+                                        <input
+                                            id="seedDiscount"
+                                            type="number"
+                                            value={seedDiscountInput}
+                                            onChange={(e) => setSeedDiscountInput(e.target.value)}
+                                            placeholder="e.g., 20"
+                                            min="0"
+                                            max="100"
+                                            step="0.1"
+                                            className="flex h-10 w-full rounded-md border border-gray-300 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50"
+                                        />
+                                    </div>
+                                </div>
+
+                                 {/* Run Button */}
+                                 <div className="md:col-span-2 mt-6 flex justify-center">
+                                    <button
+                                        onClick={handleRunSimulation}
+                                        disabled={isLoading}
+                                        className="inline-flex items-center justify-center px-6 py-2 bg-blue-600 text-white font-medium rounded-md shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 transition duration-150 ease-in-out"
+                                    >
+                                        {isLoading ? 'Simulating...' : 'Run Simulation'}
+                                        {isLoading && <span className="spinner"></span>}
+                                    </button>
+                                 </div>
+                            </div>
+                             {error && <p className="text-red-600 mt-4 text-center">{error}</p>}
+                        </div>
+                    </div>
+
+                    {/* Results Section */}
+                    {results && !isLoading && (
+                        <div className="mt-10">
+                            <h2 className="text-2xl font-semibold mb-5 text-center text-gray-700">Simulation Results</h2>
+                            {renderScenarioCard(results.conservative)}
+                            {renderScenarioCard(results.baseline)}
+                            {renderScenarioCard(results.bullish)}
+                            <p className="text-xs text-gray-500 mt-8 text-center">
+                                Note: These are simplified models ignoring liquidation preferences, specific share classes, anti-dilution clauses, and other complex terms.<br/> ESOP and SAFE conversion calculations use approximations. Initial investments assumed: Pre-Seed $500k, Seed $1.5M.
+                            </p>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // --- Mount React App ---
+        // Defined globally by CDN script
+        // App component defined above
+
+    </script>
+
+    <script type="text/babel">
+        try {
+            ReactDOM.render(
+              <App />, // App should be defined in the script block above
+              document.getElementById('root')
+            );
+            // console.log("Full React app rendering attempted."); // Keep console logs for debugging if needed
+        } catch (error) {
+            console.error("Error rendering full React app:", error);
+            // Display error in the root div if rendering fails
+            const rootDiv = document.getElementById('root');
+            if (rootDiv) {
+                rootDiv.innerHTML = '<div style="padding: 20px; border: 1px solid red; background-color: #fee; color: #a00; font-family: sans-serif;">' +
+                                    '<h2>Error Rendering Application</h2>' +
+                                    '<p>Could not render the React component. There might be an error in the simulation logic or component structure.</p>' +
+                                    '<p>Please check the browser console (F12) for detailed error messages.</p>' +
+                                    '<pre style="white-space: pre-wrap; word-wrap: break-word;">Error: ' + error.message + '</pre>' +
+                                    '</div>';
+            }
+        }
+    </script>
+
+</body>
+</html>
